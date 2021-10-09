@@ -18,20 +18,16 @@ async function getSpotifyInfo(api) {
   const username = user.id;
   const playlists = await getUserPlaylists(api, username);
   const userPlaylists = playlists.filter(playlist => username === playlist.owner.id);
-  // console.log(userPlaylists)
-  // const userSavedTracks = await getUserSavedTracks(api);
-  // console.log(userSavedTracks);
-  
+  const savedTracks = await getSavedTracks(api);
   // TODO RATE LIMIT TO 10 PLAYLISTS
-  const tracks = await getTracksFromPlaylists(api, userPlaylists.map(p=>p.id).slice(0, 10));
+  const playlistTracks = await getTracksFromPlaylists(api, userPlaylists.map(p=>p.id));
+  const tracks = playlistTracks.concat(savedTracks);
   const audioFeatures = await getTrackFeatures(api, tracks.map(p=>p.id));
-  // const tracksWithAudioFeatures = await mergeTracksWithFeatures(tracks, audioFeatures);
+  const tracksWithAudioFeatures = mergeTracksWithFeatures(tracks, audioFeatures);
   return {
     user,
-    userPlaylists,
-    //savedTracks,
-    tracks,
-    audioFeatures,
+    playlists: userPlaylists,
+    tracks: tracksWithAudioFeatures,
   };
 }
 
@@ -45,6 +41,32 @@ function objectListToDictById(objects) {
 function removeDuplicatesFromTracks(tracks) {
   const uniqueTracks = objectListToDictById(tracks);
   return Object.values(uniqueTracks);
+}
+
+// Because one object in the cloud without joins is easier
+function mergeTracksWithFeatures(tracks, audioFeatures) {
+  const trackDict = objectListToDictById(tracks);
+  return audioFeatures.map(audioFeature => {
+    return {
+      ...audioFeature,
+      ...trackDict[audioFeature.id],
+      type: "total_track_info"
+    };
+  });
+}
+
+// puts a thread to sleep. Used for waiting for rate limiting retries
+async function wait(seconds) {
+  return await new Promise(r => setTimeout(r, seconds * 1000));
+}
+
+// could have a use. Instead of calling all values at once, it does map serially.
+async function asyncMap(values, func) {
+  const acc = [];
+  while (values.length) {
+    acc.push(await func(values.pop()));
+  }
+  return acc.reverse();
 }
 /***********************************************************************/
 
@@ -63,6 +85,11 @@ async function getUserInfo(api) {
 
 // General function to get the next request in a list of requests 
 async function getNextUntilDone(func, listKeyName, endOffset) {
+  // TODO: make this concurrent for faster loading times.
+
+  const id = Math.floor(Math.random() * 1000);
+  console.log("started getNextUntilDone with id", id);
+
   if (listKeyName == null) {
     listKeyName = "items";
   }
@@ -78,27 +105,28 @@ async function getNextUntilDone(func, listKeyName, endOffset) {
       }
       if (endOffset != null) {
         if (endOffset <= offset) {
-          console.log(offset)
           return items;
         }
       } else if (!data.body.next) {
-        console.log(offset, "early")
         return items;
       }
     } catch (err) {
       if (err.statusCode == 429) {
-        console.log(`Error ${err.statusCode}: Rate limit exceeded with number ${offset} call`)
+        const retryAfterSeconds = parseInt(err.headers["retry-after"]);
+        console.log(id, "got rate limited. Going to sleep for", retryAfterSeconds, "seconds");
+        await wait(retryAfterSeconds + 1);
+        console.log(id, "done waiting")
       } else {
-        console.log('Something went wrong!', err);
+        console.log(id, 'Something went wrong');
+        return items;
       }
-      return items;
     }
   }
 }
 
 
 // Requests all of the saved tracks for a user
-async function getUserSavedTracks(api) {
+async function getSavedTracks(api) {
   return await getNextUntilDone(offset => api.getMySavedTracks({
       offset: offset * 50,
       limit: 50
@@ -122,7 +150,10 @@ async function getTracksFromPlaylists(api, playlistIds) {
   for (let playlistArray of playlistArrays) {
     playlistTracks = playlistTracks.concat(playlistArray);
   }
-  const tracks = playlistTracks.map(pt => pt?.track).filter(t=>t != null);
+  const tracks = playlistTracks
+    .map(pt => pt?.track)
+    .filter(t=>t != null)
+    .filter(t=>t.is_local == false);
   return removeDuplicatesFromTracks(tracks);
 }
 
@@ -135,27 +166,17 @@ async function getPlaylistTracks(api, playlistId) {
 }
 /***********************************************************************/
 
-
+// gets the specific info about the track
 async function getTrackFeatures(api, trackIds) {
-  // limit 100 -> songIDs at a time
+  const APIlimit = 100; // spotify limits the track features to 100
   return await getNextUntilDone(offset => api.getAudioFeaturesForTracks(
-      trackIds.slice(offset * 100, (offset + 1) * 100)),
+      trackIds.slice(offset * APIlimit, (offset + 1) * APIlimit)),
       "audio_features",
-      Math.ceil(trackIds.length / 100)
+      Math.ceil(trackIds.length / APIlimit)
   );
 }
 
-// function mergeTracksWithFeatures(tracks, audioFeatures) {
-  // const trackDict = objectListToDictById(tracks);
-  // audioFeatures.map(a => {
-  //   const track = trackDict[]
-  //   const newValue = {
-  //     ...a,
-  //     ...trackList
-  //   }
-  //   return a;
-  // });
-// }
+
 
 
 
@@ -199,15 +220,7 @@ app.get('/sync', async (req, res) => {
          <a href="/login">Get new token</a>
         </div>
         <script>
-        console.log(${JSON.stringify(info?.user)});
-        console.info("User playlists");
-        console.log(${JSON.stringify(info?.userPlaylists)});
-        console.info("save");
-        console.log(${JSON.stringify(info?.savedTracks)});
-        console.info("playlist tracks");
-        console.log(${JSON.stringify(info?.tracks)});
-        console.info("audioFeatures");
-        console.log(${JSON.stringify(info?.audioFeatures)});
+        console.log(${JSON.stringify(info)});
         </script>
      </div>
     </body>
