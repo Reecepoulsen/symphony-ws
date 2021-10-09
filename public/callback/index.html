@@ -1,0 +1,20 @@
+<html>
+
+<head>
+</head>
+
+<body>
+  <a id="url"></a>
+  <script>
+    try {
+      const access_token = new URLSearchParams(window.location.hash.substr(1)).get("access_token");
+      window.location = "http://localhost:3000/sync?access_token=" + access_token;
+      // document.querySelector("#url").textContent = access_token;
+    } catch {
+      document.querySelector("#url").textContent = "Could not get access token from URL. Please try again";
+      // document.querySelector("#url").textContent = "Could not get access token from URL. Please try again";
+    }
+  </script>
+</body>
+
+</html>
