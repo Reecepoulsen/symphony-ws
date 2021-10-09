@@ -1,0 +1,27 @@
+<html>
+
+<head>
+</head>
+
+<body>
+    <div>
+        <div id="login">
+            <h1>Success! </h1>
+            <p> Your connection id is ##id## </p>
+            <a href="/login">Get new token</a>
+        </div>
+        <script>
+            const id = "##id##";
+            console.log(id);
+            var exampleSocket = new WebSocket("ws://localhost:3000/echo");
+            exampleSocket.onopen = function (event) {
+                exampleSocket.send(id);
+            };
+            exampleSocket.onmessage = function (event) {
+                console.log(JSON.parse(event.data));
+            }
+        </script>
+    </div>
+</body>
+
+</html>

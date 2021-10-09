@@ -1,8 +1,12 @@
-const e = require('express');
 const express = require('express')
 const SpotifyWebApi = require('spotify-web-api-node')
+const uuid = require('uuid');
+const fs = require('fs');
+const path = require('path');
 const app = express()
-const port = 3000
+const expressWs = require('express-ws')(app);
+
+const PORT = 3000
 // instructions
 // http://localhost:3000/
 // copy the code
@@ -12,18 +16,23 @@ const port = 3000
 const my_client_id = '5dd2dda670184f4688b9eef425c31877'; // Symphony's permanent ID
 const redirectURL = encodeURIComponent("http://localhost:3000/callback");
 
-async function getSpotifyInfo(api) {
+async function getSpotifyInfo(api, sendMessage) {
+  sendMessage(JSON.stringify({state: "user-info"}));
   const user = await getUserInfo(api);
   if (!user) return;
   const username = user.id;
+  sendMessage(JSON.stringify({state: "user-playlists"}));
   const playlists = await getUserPlaylists(api, username);
   const userPlaylists = playlists.filter(playlist => username === playlist.owner.id);
+  sendMessage(JSON.stringify({state: "user-saved-tracks"}));
   const savedTracks = await getSavedTracks(api);
-  // TODO RATE LIMIT TO 10 PLAYLISTS
-  const playlistTracks = await getTracksFromPlaylists(api, userPlaylists.map(p=>p.id));
+  sendMessage(JSON.stringify({state: "playlist-tracks"}));
+  const playlistTracks = await getTracksFromPlaylists(api, userPlaylists.map(p => p.id));
   const tracks = playlistTracks.concat(savedTracks);
-  const audioFeatures = await getTrackFeatures(api, tracks.map(p=>p.id));
+  sendMessage(JSON.stringify({state: "audio-features"}));
+  const audioFeatures = await getTrackFeatures(api, tracks.map(p => p.id));
   const tracksWithAudioFeatures = mergeTracksWithFeatures(tracks, audioFeatures);
+  sendMessage(JSON.stringify({state: "done"}));
   return {
     user,
     playlists: userPlaylists,
@@ -34,7 +43,7 @@ async function getSpotifyInfo(api) {
 /***************************Helper functions****************************/
 // Converts a list of objects to a dictionary by IDs
 function objectListToDictById(objects) {
-  return objects.reduce((acc,o)=> (acc[o.id]=o, acc), {});
+  return objects.reduce((acc, o) => (acc[o.id] = o, acc), {});
 }
 
 // Takes all duplicates out of tracks
@@ -128,8 +137,8 @@ async function getNextUntilDone(func, listKeyName, endOffset) {
 // Requests all of the saved tracks for a user
 async function getSavedTracks(api) {
   return await getNextUntilDone(offset => api.getMySavedTracks({
-      offset: offset * 50,
-      limit: 50
+    offset: offset * 50,
+    limit: 50
   }));
 }
 
@@ -152,8 +161,8 @@ async function getTracksFromPlaylists(api, playlistIds) {
   }
   const tracks = playlistTracks
     .map(pt => pt?.track)
-    .filter(t=>t != null)
-    .filter(t=>t.is_local == false);
+    .filter(t => t != null)
+    .filter(t => t.is_local == false);
   return removeDuplicatesFromTracks(tracks);
 }
 
@@ -171,8 +180,8 @@ async function getTrackFeatures(api, trackIds) {
   const APIlimit = 100; // spotify limits the track features to 100
   return await getNextUntilDone(offset => api.getAudioFeaturesForTracks(
       trackIds.slice(offset * APIlimit, (offset + 1) * APIlimit)),
-      "audio_features",
-      Math.ceil(trackIds.length / APIlimit)
+    "audio_features",
+    Math.ceil(trackIds.length / APIlimit)
   );
 }
 
@@ -181,8 +190,8 @@ async function getTrackFeatures(api, trackIds) {
 
 
 /***********************************************************************
-* Serve HTML 
-***********************************************************************/
+ * Serve HTML 
+ ***********************************************************************/
 app.use(express.static('public'))
 
 app.get('/login', function (req, res) {
@@ -204,45 +213,86 @@ app.get('/sync', async (req, res) => {
   // starts syncing the spotify data into firebase
   const token = req.query.access_token;
   if (token) {
-    api.setAccessToken(token);
     // Get the authenticated user
-    const info = await getSpotifyInfo(api);
-    res.send(
-      `<html>
-      <head>
-      </head>
-    <body>
-     <div>
-        <div id="login">
-         <h1>Success! </h1>
-         <p> Your username is ${info?.user.id} </p>
-         <p> Your name is ${info?.user.display_name} </p>
-         <a href="/login">Get new token</a>
-        </div>
-        <script>
-        console.log(${JSON.stringify(info)});
-        </script>
-     </div>
-    </body>
-    </html>`);
+    api.setAccessToken(token);
+    const id = uuid.v4();
+    const wsapi = WebSocketAPI(id);
+    getSpotifyInfo(api, wsapi.messageCallback).then((data) => {
+      wsapi.messageCallback(JSON.stringify(data));
+    })
+    
+    fs.readFile(path.join('private', 'login-success.html'), function (err, data) {
+      if (err) {
+        res.sendStatus(404);
+      } else {
+        const contents = data.toString().replaceAll(/##id##/g, id);
+        res.send(contents);
+      }
+    });
   } else {
-    res.send(
-      `<html>
-      <head>
-      </head>
-    <body>
-     <div>
-        <div id="login">
-         <h1>Could not log in. Try to log in again.</h1>
-         <a href="/login">Log in</a>
-        </div>
-     </div>
-    </body>
-    </html>`);
+    fs.readFile(path.join('private', 'login-failed.html'), function (err, data) {
+      if (err) {
+        res.sendStatus(404);
+      } else {
+        res.send(data);
+      }
+    });
   }
 })
 
-app.listen(port, () => {
-  console.log(`Example app listening at http://localhost:${port}`)
+
+/***********************************************************************
+ * Serve WebSocket Connection
+ ***********************************************************************/
+
+const connections = {};
+
+function WebSocketAPI(id) {
+  const messageCallback = (message) => {
+    if (!(id in connections)) {
+      connections[id] = {
+        queue: [],
+        sendWSMessage: undefined,
+        messageCallback: messageCallback
+      };
+    }
+    
+    const connection = connections[id];
+    if (message != undefined) {
+      connection.queue.push(message);
+    }
+    if (connection.sendWSMessage !== undefined) {
+      while (connection.queue.length) {
+        connection.sendWSMessage(connection.queue.shift());
+      }
+    } else {
+      console.log(connection, connections[id])
+    }
+  }
+
+  return {messageCallback}
+}
+
+
+app.ws('/echo', function (ws, req) {
+  ws.on('message', function (id) {
+    console.log(id);
+    if (id in connections) {
+      connections[id].sendWSMessage = (message) => {
+        ws.send(message);
+      }
+      console.log(connections);
+    } else {
+      console.log("bad connection id");
+    }
+  });
+});
+
+
+
+/***********************************************************************
+ * Set port
+ ***********************************************************************/
+app.listen(PORT, () => {
+  console.log(`Example app listening at http://localhost:${PORT}`)
 })
-// BQD0lT9kT7zSP51_NZmY3PwvAeCGWkXYfdLXH336bDBfNb2szcA1WEiY1N7BKXlbuOUzs
