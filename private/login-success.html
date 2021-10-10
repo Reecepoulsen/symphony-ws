@@ -13,7 +13,7 @@
         <script>
             const id = "##id##";
             console.log(id);
-            var exampleSocket = new WebSocket("ws://localhost:3000/echo");
+            var exampleSocket = new WebSocket("ws://localhost:3000/progress");
             exampleSocket.onopen = function (event) {
                 exampleSocket.send(id);
             };

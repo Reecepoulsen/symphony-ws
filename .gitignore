@@ -1,1 +1,4 @@
 node_modules
+firebaseSDKinfo.json
+.vsls.json
+.env
